@@ -1,0 +1,303 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>PO File Manager (BT)</title>
+<style>
+:root{font-family:Inter,system-ui,-apple-system,Segoe UI,Roboto,'Helvetica Neue',Arial;font-size:14px}
+body{padding:18px;background:#f6f8fb;color:#111}
+.card{background:#fff;border-radius:10px;padding:16px;box-shadow:0 6px 18px rgba(20,30,60,0.06);}
+h1{font-size:20px;margin-bottom:8px}
+input[type=file]{display:inline-block;margin-right:8px}
+table{width:100%;border-collapse:collapse;margin-top:12px}
+th,td{padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:middle}
+th{background:#fafafa}
+button{padding:6px 10px;border-radius:8px;border:0;cursor:pointer}
+.btn-primary{background:#2563eb;color:#fff}
+.btn-ghost{background:#eef2ff}
+.small{font-size:12px;padding:4px 8px}
+.right{display:flex;gap:6px;align-items:center}
+.note{font-size:13px;color:#555;margin-top:8px}
+.tag{background:#e6f2ff;padding:4px 8px;border-radius:6px;font-weight:600}
+input[type=text], input[type=email]{padding:6px;border-radius:6px;border:1px solid #ddd}
+.topbar{display:flex;justify-content:space-between;gap:12px;align-items:center}
+.controls{display:flex;gap:8px;align-items:center}
+.small-link{background:transparent;border:0;color:#2563eb;cursor:pointer;text-decoration:underline;padding:0}
+.muted{color:#666;font-size:13px}
+#loginBox{background:#fff;border-radius:10px;padding:20px;box-shadow:0 6px 18px rgba(20,30,60,0.06);max-width:400px;margin:40px auto;text-align:center;}
+#loginBox input{width:80%;margin-bottom:10px;}
+#loginBox button{width:50%;}
+</style>
+<!-- SheetJS -->
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+</head>
+<body>
+
+<div id="loginBox">
+  <h1>PO File Manager — เข้าสู่ระบบ</h1>
+  <input type="text" id="loginCode" placeholder="กรอก BT Code หรือ Admin Code" />
+  <br>
+  <button id="loginBtn" class="btn-primary">เข้าสู่ระบบ</button>
+  <div class="note">รหัส Admin: <code>ACTPO1234</code></div>
+</div>
+
+<div id="mainUI" style="display:none">
+<div class="card">
+<div style="margin-bottom:12px;">
+  <button id="backToLogin" class="small">กลับไปหน้าล็อกอิน</button>
+</div>
+
+<h1>PO File Manager — BTCODE (Local)</h1>
+<div class="topbar">
+<div class="controls">
+<input id="filesInput" type="file" multiple />
+<button id="importBtn" class="btn-primary">นำเข้าไฟล์</button>
+<input id="emailListInput" type="file" accept=".xlsx,.xls,.csv" />
+<button id="importEmailBtn" class="btn-ghost small">Upload Email List</button>
+<button id="downloadAllBtn" class="btn-ghost small">ดาวน์โหลดทั้งหมด (BT เลือก)</button>
+</div>
+<div class="controls">
+<button id="sendAllBtn" class="btn-primary small">ส่งอีเมลทั้งหมด (BCC)</button>
+<button id="sendUnrecvBtn" class="btn-primary small">ส่งเฉพาะยังไม่ได้รับ (BCC)</button>
+<button id="exportExcelBtn" class="btn-ghost small">Export Excel Report</button>
+<button id="clearBtn" class="small" style="background:#e74c3c;color:#fff">เคลียร์ข้อมูลทั้งหมด</button>
+</div>
+</div>
+<div class="note">ระบบจะสกัด BTCODE จากชื่อไฟล์ (เช่น <code>BT0180</code>) และจัดไฟล์ที่มี BT เดียวกันให้อยู่แถวเดียวกัน</div>
+<div class="note muted">หมายเหตุ: ไฟล์ถูกเก็บในเครื่องของคุณ (IndexedDB). หากต้องการให้ดาวน์โหลดจริง ต้องอัปโหลดไฟล์บนเซิร์ฟเวอร์/Drive</div>
+<table id="poTable" aria-label="PO List">
+<thead>
+<tr>
+<th style="width:120px">BT Code</th>
+<th>Excel</th>
+<th>PDF</th>
+<th style="width:220px">Supplier Attach</th>
+<th style="width:200px">Recipient Email</th>
+<th style="width:110px">Actions</th>
+<th style="width:140px">Receiving Time</th>
+<th style="width:140px">Sent Time</th>
+</tr>
+</thead>
+<tbody></tbody>
+</table>
+</div>
+</div>
+
+<script>
+// ---------- IndexedDB ----------
+const DB_NAME='po_file_db_v4';
+const STORE='files_store';
+async function openDb(){return new Promise((resolve,reject)=>{
+  const req=indexedDB.open(DB_NAME,1);
+  req.onupgradeneeded=e=>{
+    const db=e.target.result;
+    if(!db.objectStoreNames.contains(STORE)){
+      const s=db.createObjectStore(STORE,{keyPath:'id',autoIncrement:true});
+      s.createIndex('bt','bt',{unique:false});
+      s.createIndex('name','name',{unique:false});
+    }
+  };
+  req.onsuccess=e=>resolve(e.target.result);
+  req.onerror=e=>reject(e.target.error);
+});}
+
+async function addFile(blob,name,bt,role){const db=await openDb();return new Promise((resolve,reject)=>{
+  const tx=db.transaction(STORE,'readwrite');const store=tx.objectStore(STORE);
+  const item={name,bt,role,blob,created:new Date().toISOString(),recipient:null,receiveTime:null,sendTime:null};
+  const r=store.add(item);r.onsuccess=()=>resolve(r.result);r.onerror=e=>reject(e.target.error);
+});}
+async function getAllRecords(){const db=await openDb();return new Promise((resolve,reject)=>{
+  const tx=db.transaction(STORE,'readonly');const store=tx.objectStore(STORE);
+  const req=store.getAll();
+  req.onsuccess=()=>resolve(req.result||[]);
+  req.onerror=e=>reject(e.target.error);
+});}
+async function getRecordsByBT(bt){const db=await openDb();return new Promise((resolve,reject)=>{
+  const tx=db.transaction(STORE,'readonly');const store=tx.objectStore(STORE);const idx=store.index('bt');
+  const req=idx.getAll(bt);
+  req.onsuccess=()=>resolve(req.result||[]);
+  req.onerror=e=>reject(e.target.error);
+});}
+async function getRecordById(id){const db=await openDb();return new Promise((resolve,reject)=>{
+  const tx=db.transaction(STORE,'readonly');const store=tx.objectStore(STORE);
+  const req=store.get(Number(id));
+  req.onsuccess=()=>resolve(req.result);
+  req.onerror=e=>reject(e.target.error);
+});}
+async function updateRecord(id,patch){const db=await openDb();return new Promise((resolve,reject)=>{
+  const tx=db.transaction(STORE,'readwrite');const store=tx.objectStore(STORE);
+  const req=store.get(Number(id));
+  req.onsuccess=()=>{const rec=req.result;if(!rec){reject('not found');return;}Object.assign(rec,patch);
+  const put=store.put(rec);put.onsuccess=()=>resolve(put.result);put.onerror=e=>reject(e.target.error);};
+  req.onerror=e=>reject(e.target.error);
+});}
+async function deleteAllRecords(){const db=await openDb();return new Promise((resolve,reject)=>{
+  const tx=db.transaction(STORE,'readwrite');const store=tx.objectStore(STORE);
+  const req=store.clear();req.onsuccess=()=>resolve();req.onerror=e=>reject(e.target.error);
+});}
+function extractBT(filename){if(!filename)return null;const m=filename.match(/(BT\d{3,})/i);return m?m[1].toUpperCase():null;}
+function makeObjectURL(blob){return URL.createObjectURL(blob);}
+
+// ---------- Login & Role ----------
+let isAdmin=false;
+let userBT=null;
+const loginBox=document.getElementById('loginBox');
+const mainUI=document.getElementById('mainUI');
+
+document.getElementById('backToLogin').addEventListener('click',()=>{
+  loginBox.style.display='block';
+  mainUI.style.display='none';
+  userBT=null;
+});
+
+document.getElementById('loginBtn').addEventListener('click',()=>{
+  const code=document.getElementById('loginCode').value.trim();
+  if(!code){alert('กรุณากรอกรหัส');return;}
+  if(code.toUpperCase()==='ACTPO1234'){isAdmin=true;userBT=null;}
+  else{isAdmin=false;userBT=code.toUpperCase();}
+  loginBox.style.display='none';
+  mainUI.style.display='block';
+  renderTable(userBT);
+});
+
+// ---------- Group & Render ----------
+async function groupedByBT(){const all=await getAllRecords();const map={};
+  for(const r of all){const bt=r.bt||'UNKNOWN';if(!map[bt])map[bt]=[];map[bt].push(r);}
+  return map;
+}
+
+async function renderTable(filterBT=null){
+  const tbody=document.querySelector('#poTable tbody');
+  tbody.innerHTML='';
+  const map=await groupedByBT();const keys=Object.keys(map).sort();
+  if(keys.length===0){tbody.innerHTML='<tr><td colspan="8" class="muted">ยังไม่มีข้อมูล (อัปโหลดไฟล์เพื่อเริ่ม)</td></tr>';return;}
+  for(const bt of keys){
+    if(!isAdmin && filterBT && bt!==filterBT) continue;
+    const recs=map[bt];const excels=recs.filter(r=>r.role==='excel');const pdfs=recs.filter(r=>r.role==='pdf');const suppliers=recs.filter(r=>r.role==='supplier');const meta=recs[0];
+    const tr=document.createElement('tr');tr.dataset.bt=bt;
+
+    function buildList(items){if(!items.length)return'-';const wrap=document.createElement('div');
+      for(const it of items){const div=document.createElement('div');const a=document.createElement('a');a.href='#';a.textContent=it.name;
+        a.addEventListener('click',async ev=>{ev.preventDefault();const full=await getRecordById(it.id);const url=makeObjectURL(full.blob);window.open(url,'_blank');setTimeout(()=>URL.revokeObjectURL(url),60000);});
+        const dl=document.createElement('button');dl.className='small btn-ghost';dl.textContent='ดาวน์โหลด';dl.style.marginLeft='8px';
+        dl.addEventListener('click',async()=>{const full=await getRecordById(it.id);const url=makeObjectURL(full.blob);const a2=document.createElement('a');a2.href=url;a2.download=full.name;document.body.appendChild(a2);a2.click();a2.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);});
+        div.appendChild(a);div.appendChild(dl);wrap.appendChild(div);}
+      return wrap;}
+
+    const excelCell=buildList(excels);const pdfCell=buildList(pdfs);const suppCell=buildList(suppliers);
+    const supplierInput=document.createElement('input');supplierInput.type='file';supplierInput.accept='.pdf,.xlsx,.xls,.csv';
+    supplierInput.addEventListener('change',async e=>{const f=e.target.files[0];if(!f)return;await addFile(f,f.name,bt,'supplier');alert(`แนบไฟล์สำหรับ ${bt} สำเร็จ`);await renderTable(filterBT);});
+    const emailInput=document.createElement('input');emailInput.type='email';emailInput.placeholder='supplier@example.com';emailInput.style.width='100%';emailInput.value=meta.recipient||'';
+    emailInput.addEventListener('change',async()=>{for(const r of recs){await updateRecord(r.id,{recipient:emailInput.value});}await renderTable(filterBT);});
+
+    const actionsDiv=document.createElement('div');actionsDiv.className='right';
+    const receiveBtn=document.createElement('button');receiveBtn.className='receive-btn small';receiveBtn.textContent='รับ';
+    receiveBtn.addEventListener('click',async()=>{const t=new Date().toLocaleString();for(const r of recs){await updateRecord(r.id,{receiveTime:t});}await renderTable(filterBT);});
+
+    const dlAllBtn=document.createElement('button');dlAllBtn.className='small btn-ghost';dlAllBtn.textContent='ดาวน์โหลดทั้งหมด';
+    dlAllBtn.addEventListener('click',async()=>{for(const r of recs){const full=await getRecordById(r.id);const url=makeObjectURL(full.blob);const a=document.createElement('a');a.href=url;a.download=full.name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}});
+
+    if(!isAdmin){dlAllBtn.disabled=false;}
+
+    const tdBT=document.createElement('td');tdBT.textContent=bt;
+    const tdExcel=document.createElement('td');tdExcel.append(excelCell);
+    const tdPDF=document.createElement('td');tdPDF.append(pdfCell);
+    const tdSupplier=document.createElement('td');tdSupplier.append(suppCell,document.createElement('br'),supplierInput);
+    const tdEmail=document.createElement('td');tdEmail.append(emailInput);
+    const tdActions=document.createElement('td');tdActions.append(actionsDiv);tdActions.append(receiveBtn,dlAllBtn);
+    const tdRecv=document.createElement('td');tdRecv.textContent=recs.find(x=>x.receiveTime)?.receiveTime||'-';
+    const tdSent=document.createElement('td');tdSent.textContent=recs.find(x=>x.sendTime)?.sendTime||'-';
+    tr.append(tdBT,tdExcel,tdPDF,tdSupplier,tdEmail,tdActions,tdRecv,tdSent);
+    tbody.append(tr);
+  }
+
+  if(!isAdmin){
+    document.getElementById('downloadAllBtn').disabled=true;
+    document.getElementById('sendAllBtn').disabled=true;
+    document.getElementById('sendUnrecvBtn').disabled=true;
+    document.getElementById('clearBtn').disabled=true;
+    document.getElementById('exportExcelBtn').disabled=false;
+  }
+}
+
+// ---------- Upload Files ----------
+document.getElementById('importBtn').addEventListener('click',async()=>{
+  const files=document.getElementById('filesInput').files;if(!files||files.length===0){alert('เลือกไฟล์ก่อนแล้วกดนำเข้า');return;}
+  for(const f of files){const bt=extractBT(f.name)||'UNKNOWN';let role='other';const lower=f.name.toLowerCase();
+    if(lower.endsWith('.pdf')) role='pdf';if(lower.endsWith('.xls')||lower.endsWith('.xlsx')||lower.endsWith('.csv')) role='excel';
+    await addFile(f,f.name,bt,role);}
+  document.getElementById('filesInput').value='';await renderTable(userBT);alert('นำเข้าไฟล์เรียบร้อย');});
+
+// ---------- Upload Email List ----------
+document.getElementById('importEmailBtn').addEventListener('click',async()=>{
+  const file=document.getElementById('emailListInput').files[0];if(!file){alert('เลือกไฟล์ Email List ก่อน');return;}
+  const data = await file.arrayBuffer();
+  const wb=XLSX.read(data,{type:'array'});
+  const ws=wb.Sheets[wb.SheetNames[0]];
+  const json=XLSX.utils.sheet_to_json(ws,{header:1});
+  for(const row of json){const bt=row[0],email=row[1];if(bt&&email){
+    const recs=await getRecordsByBT(bt.toUpperCase());
+    for(const r of recs){await updateRecord(r.id,{recipient:email});}
+  }}
+  alert('อัปเดต Email เรียบร้อย');await renderTable(userBT);
+});
+
+// ---------- Global Buttons ----------
+document.getElementById('downloadAllBtn').addEventListener('click',async()=>{
+  if(!isAdmin) return;
+  const rows=document.querySelectorAll('#poTable tbody tr');for(const tr of rows){const bt=tr.dataset.bt;const recs=await getRecordsByBT(bt);
+    for(const r of recs){const full=await getRecordById(r.id);const url=makeObjectURL(full.blob);const a=document.createElement('a');a.href=url;a.download=full.name;document.body.appendChild(a);a.click();a.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);}}});
+
+document.getElementById('sendAllBtn').addEventListener('click',async()=>{
+  const allRecs=await getAllRecords();
+  const emails=[...new Set(allRecs.map(r=>r.recipient).filter(r=>r))];
+  if(emails.length===0){alert('ไม่มีอีเมลให้ส่ง');return;}
+  let body='เรียน Supplier,\n\nกรุณาเข้าดู PO ตามลิงก์ด้านล่าง:\n\n';
+  const map=await groupedByBT();
+  for(const bt of Object.keys(map)){body+=`${bt}: ${location.origin}${location.pathname}?bt=${encodeURIComponent(bt)}\n`;}
+  const mailto=`mailto:?bcc=${encodeURIComponent(emails.join(','))}&subject=${encodeURIComponent('PO Files')}&body=${encodeURIComponent(body)}`;
+  window.location.href=mailto;
+  const t=new Date().toLocaleString();
+  for(const r of allRecs){await updateRecord(r.id,{sendTime:t});}
+  await renderTable(userBT);
+});
+
+document.getElementById('sendUnrecvBtn').addEventListener('click',async()=>{
+  const allRecs=await getAllRecords();
+  const unrecv=allRecs.filter(r=>!r.receiveTime && r.recipient);
+  const emails=[...new Set(unrecv.map(r=>r.recipient))];
+  if(emails.length===0){alert('ไม่มีอีเมลยังไม่ได้รับ');return;}
+  let body='เรียน Supplier,\n\nกรุณาเข้าดู PO ที่ยังไม่ได้รับ:\n\n';
+  const map=await groupedByBT();
+  for(const bt of Object.keys(map)){
+    const recs=map[bt].filter(r=>!r.receiveTime);
+    if(recs.length>0){body+=`${bt}: ${location.origin}${location.pathname}?bt=${encodeURIComponent(bt)}\n`;}
+  }
+  const mailto=`mailto:?bcc=${encodeURIComponent(emails.join(','))}&subject=${encodeURIComponent('PO Files ยังไม่ได้รับ')}&body=${encodeURIComponent(body)}`;
+  window.location.href=mailto;
+});
+
+document.getElementById('exportExcelBtn').addEventListener('click', async()=>{
+  const allRecs=await getAllRecords(); if(allRecs.length===0){alert('ยังไม่มีข้อมูล');return;}
+  const ws_data=[['BT Code','Excel','PDF','Supplier Attach','Recipient Email','Receiving Time','Sent Time']];
+  const map=await groupedByBT();
+  for(const bt of Object.keys(map)){
+    const recs=map[bt];
+    const excels=recs.filter(r=>r.role==='excel').map(r=>r.name).join('; ');
+    const pdfs=recs.filter(r=>r.role==='pdf').map(r=>r.name).join('; ');
+    const suppliers=recs.filter(r=>r.role==='supplier').map(r=>r.name).join('; ');
+    const recipient=recs[0]?.recipient||'';
+    const recv=recs.find(r=>r.receiveTime)?.receiveTime||'';
+    const sent=recs.find(r=>r.sendTime)?.sendTime||'';
+    ws_data.push([bt,excels,pdfs,suppliers,recipient,recv,sent]);
+  }
+  const wb=XLSX.utils.book_new(); const ws=XLSX.utils.aoa_to_sheet(ws_data);
+  XLSX.utils.book_append_sheet(wb,ws,'PO Report'); XLSX.writeFile(wb,'PO_Report.xlsx');
+});
+
+document.getElementById('clearBtn').addEventListener('click',async()=>{
+  if(!isAdmin) return; if(confirm('ลบข้อมูลทั้งหมดในเครื่อง?')){await deleteAllRecords();await renderTable(userBT);alert('ลบเรียบร้อย');}});
+</script>
+</body>
+</html>
